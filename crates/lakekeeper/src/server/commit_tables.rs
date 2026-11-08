@@ -15,7 +15,10 @@ use iceberg_ext::{
 use lakekeeper_io::Location;
 
 use crate::{
-    server::tables::{create_table::ensure_format_version_allowed, parse_table_property_updates},
+    server::tables::{
+        create_table::ensure_format_version_allowed, ensure_schema_format_versions,
+        parse_table_property_updates,
+    },
     service::{
         AllowedFormatVersions, ErrorModel, IcebergErrorResponse, Result,
         authz::{CatalogTableAction, CommitFacts},
@@ -191,6 +194,7 @@ pub(super) fn apply_commit(
         tracing::debug!("Table metadata build failed: {}", e);
         commit_times.build_error(e, now_ms)
     })?;
+    ensure_schema_format_versions(&build_result.metadata)?;
     ensure_schema_content_stable(
         previous_schemas.iter(),
         build_result.metadata.schemas_iter(),

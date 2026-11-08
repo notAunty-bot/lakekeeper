@@ -33,6 +33,8 @@ bash run.sh spark_wasbs-1.10.1
 bash run.sh spark_onelake-1.10.1
 # Pyiceberg
 bash run.sh pyiceberg
+# DuckDB V3 geometry
+bash run.sh duckdb
 # Pyiceberg with legacy MD5 checksums for S3
 bash run.sh pyiceberg-legacy_md5
 # Pyiceberg against AWS S3 with remote signing

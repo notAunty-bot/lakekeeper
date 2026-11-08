@@ -455,6 +455,8 @@ impl<C: CatalogStore, A: Authorizer + Clone, S: SecretStore>
             &warehouse.allowed_format_versions,
         )?;
 
+        ensure_schema_format_versions(&table_metadata)?;
+
         let namespace_id = namespace.namespace_id();
         let table_metadata = Arc::new(table_metadata);
 
@@ -2458,6 +2460,21 @@ pub(crate) fn delete_after_commit_enabled(properties: &HashMap<String, String>) 
         .map_or(PROPERTY_METADATA_DELETE_AFTER_COMMIT_ENABLED_DEFAULT, |v| {
             matches!(v.to_lowercase().as_str(), "true" | "yes" | "1")
         })
+}
+
+pub(crate) fn ensure_schema_format_versions(metadata: &TableMetadata) -> Result<()> {
+    for schema in metadata.schemas_iter() {
+        schema
+            .check_format_compatibility(metadata.format_version())
+            .map_err(|e| {
+                ErrorModel::bad_request(
+                    "Schema is incompatible with the table format version",
+                    "InvalidSchemaFormatVersion",
+                    Some(Box::new(e)),
+                )
+            })?;
+    }
+    Ok(())
 }
 
 pub fn validate_table_properties<'a, I>(properties: I) -> Result<()>

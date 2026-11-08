@@ -57,6 +57,8 @@ pub enum IcebergTypeKind {
     Fixed,
     Binary,
     Unknown,
+    Geometry,
+    Geography,
     Variant,
     Struct,
     List,
@@ -75,7 +77,10 @@ impl IcebergTypeKind {
     /// Exhaustive (no wildcard) so a future kind forces a decision here, like `type_kind_and_params`.
     fn permits_non_null_default(self) -> bool {
         match self {
-            IcebergTypeKind::Variant | IcebergTypeKind::Unknown => false,
+            IcebergTypeKind::Variant
+            | IcebergTypeKind::Unknown
+            | IcebergTypeKind::Geometry
+            | IcebergTypeKind::Geography => false,
             IcebergTypeKind::Boolean
             | IcebergTypeKind::Int
             | IcebergTypeKind::Long
@@ -282,6 +287,13 @@ fn type_kind_and_params(ty: &Type) -> (IcebergTypeKind, Option<Value>) {
             ),
             PrimitiveType::Binary => (IcebergTypeKind::Binary, None),
             PrimitiveType::Unknown => (IcebergTypeKind::Unknown, None),
+            PrimitiveType::Geometry(geometry) => {
+                (IcebergTypeKind::Geometry, Some(serde_json::json!(geometry)))
+            }
+            PrimitiveType::Geography(geography) => (
+                IcebergTypeKind::Geography,
+                Some(serde_json::json!(geography)),
+            ),
         },
         Type::Struct(_) => (IcebergTypeKind::Struct, None),
         Type::List(_) => (IcebergTypeKind::List, None),
@@ -630,6 +642,8 @@ fn primitive_from_row(row: &SchemaFieldRow, kind: &str) -> Result<Type, SchemaNo
         }
         "binary" => PrimitiveType::Binary,
         "unknown" => PrimitiveType::Unknown,
+        "geometry" => PrimitiveType::Geometry(geospatial_params_from_row(row)?),
+        "geography" => PrimitiveType::Geography(geospatial_params_from_row(row)?),
         other => {
             return Err(SchemaNormError::Assembly {
                 detail: format!(
@@ -640,6 +654,19 @@ fn primitive_from_row(row: &SchemaFieldRow, kind: &str) -> Result<Type, SchemaNo
         }
     };
     Ok(Type::Primitive(p))
+}
+
+fn geospatial_params_from_row<T: serde::de::DeserializeOwned>(
+    row: &SchemaFieldRow,
+) -> Result<T, SchemaNormError> {
+    serde_json::from_value(row.type_params.clone().unwrap_or(Value::Null)).map_err(|e| {
+        SchemaNormError::Assembly {
+            detail: format!(
+                "invalid {} type_params for field '{}' (field_id={}): {e}",
+                row.type_kind, row.name, row.field_id
+            ),
+        }
+    })
 }
 
 // ─── Helper: FlatField → SchemaFieldRow ──────────────────────────────────────
@@ -855,6 +882,18 @@ mod tests {
             NestedField::required(15, "f_fixed", Type::Primitive(PrimitiveType::Fixed(16))).into(),
             NestedField::required(16, "f_binary", Type::Primitive(PrimitiveType::Binary)).into(),
             NestedField::optional(25, "f_unknown", Type::Primitive(PrimitiveType::Unknown)).into(),
+            NestedField::optional(
+                26,
+                "f_geometry",
+                Type::Primitive(PrimitiveType::Geometry(Default::default())),
+            )
+            .into(),
+            NestedField::optional(
+                27,
+                "f_geography",
+                Type::Primitive(PrimitiveType::Geography(Default::default())),
+            )
+            .into(),
             NestedField::required(17, "f_variant", Type::Variant(VariantType)).into(),
             NestedField::required(
                 18,
@@ -911,6 +950,86 @@ mod tests {
             &reparsed, schema,
             "JSON parse-back failed for schema_id={schema_id}"
         );
+    }
+
+    #[test]
+    fn test_geospatial_params_round_trip() {
+        for (kind, params, canonical) in [
+            (
+                "geometry",
+                serde_json::json!({"crs": "OGC:CRS84"}),
+                "geometry(OGC:CRS84)",
+            ),
+            (
+                "geometry(ePsG:3857)",
+                serde_json::json!({"crs": "ePsG:3857"}),
+                "geometry(ePsG:3857)",
+            ),
+            (
+                "geography",
+                serde_json::json!({"crs": "OGC:CRS84", "algorithm": "spherical"}),
+                "geography(OGC:CRS84, spherical)",
+            ),
+            (
+                "geography(EPSG:4326)",
+                serde_json::json!({"crs": "EPSG:4326", "algorithm": "spherical"}),
+                "geography(EPSG:4326, spherical)",
+            ),
+            (
+                "geography(OGC:CRS27, vincenty)",
+                serde_json::json!({"crs": "OGC:CRS27", "algorithm": "vincenty"}),
+                "geography(OGC:CRS27, vincenty)",
+            ),
+            (
+                "geography(EPSG:4326, thomas)",
+                serde_json::json!({"crs": "EPSG:4326", "algorithm": "thomas"}),
+                "geography(EPSG:4326, thomas)",
+            ),
+            (
+                "geography(EPSG:4326, andoyer)",
+                serde_json::json!({"crs": "EPSG:4326", "algorithm": "andoyer"}),
+                "geography(EPSG:4326, andoyer)",
+            ),
+            (
+                "geography(EPSG:4326, karney)",
+                serde_json::json!({"crs": "EPSG:4326", "algorithm": "karney"}),
+                "geography(EPSG:4326, karney)",
+            ),
+        ] {
+            let schema: Schema = serde_json::from_value(serde_json::json!({
+                "type": "struct", "schema-id": 0, "fields": [
+                    {"id": 1, "name": "point", "required": false, "type": kind}
+                ]
+            }))
+            .unwrap();
+            let flat = flatten_schema(&schema).unwrap();
+            assert_eq!(flat[0].type_params, Some(params));
+            let assembled = assemble_schemas(vec![flat_to_row(&flat[0], 0)], &[0]).unwrap();
+            assert_eq!(
+                serde_json::to_value(&assembled[&0]).unwrap()["fields"][0]["type"],
+                canonical
+            );
+            round_trip(&schema);
+        }
+    }
+
+    #[test]
+    fn test_invalid_geospatial_params_rejected() {
+        for kind in ["geometry", "geography"] {
+            let schema: Schema = serde_json::from_value(serde_json::json!({
+                "type": "struct", "schema-id": 0, "fields": [
+                    {"id": 1, "name": "point", "required": false, "type": kind}
+                ]
+            }))
+            .unwrap();
+            let flat = flatten_schema(&schema).unwrap();
+            let mut row = flat_to_row(&flat[0], 0);
+            row.type_params = None;
+            assert!(matches!(
+                assemble_schemas(vec![row], &[0]),
+                Err(SchemaNormError::Assembly { .. })
+            ));
+        }
     }
 
     #[test]
@@ -1295,6 +1414,8 @@ mod tests {
         assert_eq!(IcebergTypeKind::Uuid.as_str(), "uuid");
         assert_eq!(IcebergTypeKind::Fixed.as_str(), "fixed");
         assert_eq!(IcebergTypeKind::Binary.as_str(), "binary");
+        assert_eq!(IcebergTypeKind::Geometry.as_str(), "geometry");
+        assert_eq!(IcebergTypeKind::Geography.as_str(), "geography");
         assert_eq!(IcebergTypeKind::Variant.as_str(), "variant");
         assert_eq!(IcebergTypeKind::Struct.as_str(), "struct");
         assert_eq!(IcebergTypeKind::List.as_str(), "list");
@@ -1460,9 +1581,6 @@ mod pg_enum_db_test {
 
     use super::*;
 
-    // PG-side guard (DB test): the `iceberg_type_kind` enum must contain every kind Rust can
-    // emit. It is a SUPERSET — it also pre-includes released v3 types (geometry/geography/unknown)
-    // not yet in iceberg-rust, so adopting those is a pure-Rust change with no enum migration.
     #[sqlx::test]
     async fn pg_enum_covers_all_type_kinds(pool: sqlx::PgPool) {
         let labels: Vec<String> = sqlx::query_scalar(
