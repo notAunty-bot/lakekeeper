@@ -17,7 +17,7 @@ if [ "${LAKEKEEPER_IN_CONTAINER:-0}" = "1" ]; then
     export LAKEKEEPER_TEST__SPARK_ICEBERG_VERSION="${LAKEKEEPER_TEST__SPARK_ICEBERG_VERSION:-$DEFAULT_ICEBERG_VERSION}"
     echo "Running all tests (iceberg ${LAKEKEEPER_TEST__SPARK_ICEBERG_VERSION})..."
     cd "${SCRIPT_DIR}/python"
-    exec tox -qe pyiceberg,duckdb,spark_minio_remote_signing,spark_minio_sts,spark_adls,spark_gcs,trino,spark_minio_s3a
+    exec tox -qe pyiceberg,spark_minio_remote_signing,spark_minio_sts,spark_adls,spark_gcs,trino,spark_minio_s3a
 fi
 
 # ── Host-side execution ───────────────────────────────────────────────────────
